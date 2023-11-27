@@ -1,0 +1,189 @@
+name: my1_Sync Fork
+
+# 需要填写变量 ORIGINAL_OWNER ORIGINAL_REPOSITORY UPSTREAM_BRANCH MY_BRANCH
+# 需要创建环境变量 MYGITHUB_TOKEN MYGITHUB_USERNAME
+env:
+  ORIGINAL_OWNER: SMSBoom
+  ORIGINAL_REPOSITORY: OpenEthan
+  UPSTREAM_BRANCH: master
+  MY_BRANCH: master
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [1]
+  schedule:
+    - cron: '*/30 * * * *'
+
+jobs:
+  sync-fork:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Use Node.js 16
+      uses: actions/setup-node@v2
+      with:
+        node-version: 16
+        
+    - name: Checkout
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+
+    - name: Fetch Upstream
+      run: |
+        echo "更新前："
+        tree .github -a 
+        git remote add upstream https://github.com/${{ env.ORIGINAL_OWNER }}/${{ env.ORIGINAL_REPOSITORY }}.git
+        git fetch upstream
+        echo "git checkout ${{ env.MY_BRANCH }}"
+        cp -fr .github/workflows/my1*.yaml /tmp/
+        git reset --hard upstream/${{ env.UPSTREAM_BRANCH }}
+        if [ -d ".github" ]; then
+            mv .github ${{ env.ORIGINAL_REPOSITORY }}.github
+        else
+            mkdir .github
+        fi
+        echo "git reset --hard upstream：后"
+        mkdir -p .github/workflows/
+        rm -fr .github > /dev/null
+        mkdir -p .github/workflows/
+        tree .github -a 
+        cp -fr /tmp/my1*.yaml .github/workflows/
+        echo "复制后，准备进入 - name: Push Changes"
+        tree .github -a 
+
+    - name: set git
+      run: |
+        echo "protocol=https\nhost=github.com\nusername=${{ secrets.MYGITHUB_USERNAME }}\npassword=${{ secrets.MYGITHUB_TOKEN }}" | git credential approve
+        git config --global user.name "BOT"
+        git config --global user.email "BOT@github.com"
+
+    - name: Push
+      # uses: ad-m/github-push-action@master
+      # with:
+      #   github_token: ${{ secrets.MYGITHUB_TOKEN }}
+      #   branch: ${{ env.MY_BRANCH }}
+      #   force: true
+      run: |
+        echo "准备git add - name: Push Changes"
+        tree .github -a 
+        git add .
+        git commit -m "BOT SYNC"
+        git push -u -f origin ${{ env.MY_BRANCH }}
+
+    - name : 占位
+      run: |
+        echo "占位"
+
+    - name: Check if Push Failed
+      run: |
+        if [[ "${{ steps.Push.outcome }}" == "failure" ]]; then
+          echo "抱歉失败退出了"
+          exit 1
+        fi
+
+  sync-release:
+    needs: sync-fork
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: 安装 jq gh
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq gh
+    
+    - name: Get Latest Release
+      id: latest_release
+      run: |
+        response=$(curl --silent "https://api.github.com/repos/${{ env.ORIGINAL_OWNER }}/${{ env.ORIGINAL_REPOSITORY }}/releases/latest")
+        if [[ "$response" == *"Not Found"* ]]; then
+          echo "步骤1：在上游仓库中未找到发布版本。跳过创建新发布。"
+          echo "skip=true" >> $GITHUB_ENV
+        else
+          echo "步骤2：在上游仓库中找到了发布版本。"
+          echo "skip=false" >> $GITHUB_ENV
+          tag_name=$(echo $response | jq -r .tag_name)
+          echo "tag_name=$tag_name" >> $GITHUB_ENV
+          echo "tag_name is: $tag_name"
+          body=$(echo $response | jq -r '.body')
+          printf 'body=%q\n' "$body" >> $GITHUB_ENV
+          echo "body is: $body"
+          assets_url=$(echo $response | jq -r .assets_url)
+          echo "assets_url=$assets_url" >> $GITHUB_ENV
+          echo "assets_url is: $assets_url"
+
+          assets_count=$(echo $response | jq -r '.assets | length')
+          echo "assets_count=$assets_count" >> $GITHUB_ENV
+          echo "assets_count is: $assets_count"
+          if [[ "$assets_count" == '0' ]]; then
+            echo "步骤3：在上游仓库的发布版本中未找到资源。"
+            echo "skip_download=true" >> $GITHUB_ENV
+            echo "没有资源无资源！！！！！"
+          else
+            echo "步骤4：在上游仓库的发布版本中找到了资源。"
+            echo "skip_download=false" >> $GITHUB_ENV
+          fi
+        fi
+  
+    - name: Check if release exists and is new
+      id: check_release
+      run: |
+        if [[ "${{ env.skip }}" == 'false' ]]; then
+          echo "步骤5：开始检查本地仓库中是否存在该发布版本。"
+          for i in {1..10}
+          do
+            response=$(curl --silent --max-time 30 "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.tag_name }}")
+            echo "这里得到的状态码是" $response
+            echo "作废代码=status_code=$(echo $response | jq -r '.status_code')"
+            status_code=$(curl -I -s -o /dev/null -w "%{http_code}" "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ env.tag_name }}")
+            if [[ "$status_code" == '404' ]]; then
+              echo "步骤6：在本地仓库中未找到该发布版本。继续创建新发布。"
+              echo "skip=false" >> $GITHUB_ENV
+              break
+            elif [[ "$status_code" == '200' ]]; then
+              echo "步骤7：在本地仓库中已存在该发布版本。跳过创建新发布。"
+              echo "skip=true" >> $GITHUB_ENV
+              break
+            else
+              echo "步骤8：请求失败，状态码为 $status_code。等待 10 秒后重试。"
+              sleep 10
+            fi
+          done
+        fi
+      
+    - name: Create Release
+      id: create_release
+      if: ${{ env.skip == 'false' }}
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.MYGITHUB_TOKEN }}
+        body: ${{ env.body }}
+      with:
+        tag_name: ${{ env.tag_name }}
+        release_name: 发布 ${{ env.tag_name }}
+        body: ${{ env.body }}
+        draft: false
+        prerelease: false
+
+    - name: download-update
+      if: ${{ env.skip_download == 'false' }}
+      run: |
+        echo "步骤9：开始下载和上传发布资源。"
+        assets=$(curl --silent "${{ env.assets_url }}")
+        asset_ids=$(echo $assets | jq -r '.[].id')
+        for asset_id in $asset_ids; do
+          asset=$(curl --silent "https://api.github.com/repos/${{ env.ORIGINAL_OWNER }}/${{ env.ORIGINAL_REPOSITORY }}/releases/assets/$asset_id")
+          asset_url=$(echo $asset | jq -r '.browser_download_url')
+          asset_name=$(echo $asset | jq -r '.name')
+          curl -LJO $asset_url
+          gh release upload ${{ env.tag_name }} $asset_name --repo ${{ github.repository }}
+        done
+      env:
+        GH_TOKEN: ${{ secrets.MYGITHUB_TOKEN }}
+
+    - name: Check if download Failed
+      run: |
+        if [[ "${{ steps.download-update.outcome }}" == "failure" ]]; then
+          echo "抱歉失败退出了"
+          exit 1
+        fi
