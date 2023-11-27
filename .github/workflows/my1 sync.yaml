@@ -5,7 +5,7 @@ name: my1_Sync Fork
 env:
   ORIGINAL_OWNER: OpenEthan
   ORIGINAL_REPOSITORY: SMSBoom
-  UPSTREAM_BRANCH: master
+  UPSTREAM_BRANCH: main
   MY_BRANCH: master
 
 on:
